@@ -107,3 +107,89 @@ week_means |> knitr::kable(digits = 2)
 ```
 
 At week 1 the two arms are indistinguishable. Group means are nearly identical (`r week_means |> filter(arm == "Control", week == 1) |> pull(mean_value) |> round(2)` in the control arm and `r week_means |> filter(arm == "Experimental", week == 1) |> pull(mean_value) |> round(2)` in the experimental arm), and individual trajectories are fully intermingled. Over the following weeks the experimental arm trends upward while the control arm stays flat, ending at `r week_means |> filter(arm == "Experimental", week == 8) |> pull(mean_value) |> round(2)` and `r week_means |> filter(arm == "Control", week == 8) |> pull(mean_value) |> round(2)` respectively. By week 8 the groups have almost completely separated: nearly every experimental subject sits above nearly every control subject. Both arms show substantial week-to-week variability within individual subjects, so single observations are noisy; the difference between groups appears in the trend across weeks rather than in any one measurement.
+
+## Problem 3
+
+```{r}
+sim_power = function(mu, n = 30, sigma = 5) {
+  
+  x = rnorm(n = n, mean = mu, sd = sigma)
+  
+  t.test(x) |> 
+    broom::tidy() |> 
+    select(estimate, p.value)
+  
+}
+```
+
+```{r}
+sim_results_df = 
+  expand_grid(
+    true_mu = 0:6,
+    iter = 1:5000
+  ) |> 
+  mutate(test_results = map(true_mu, sim_power)) |> 
+  unnest(test_results)
+
+sim_results_df
+```
+
+```{r}
+power_df = 
+  sim_results_df |> 
+  group_by(true_mu) |> 
+  summarize(power = mean(p.value < 0.05))
+
+power_df |> 
+  ggplot(aes(x = true_mu, y = power)) + 
+  geom_line() + 
+  geom_point() + 
+  scale_x_continuous(breaks = 0:6) + 
+  labs(
+    title = "Power of the one-sample t-test by effect size",
+    x = "True value of mu",
+    y = "Proportion of null hypotheses rejected",
+    caption = "5,000 simulations per value; n = 30, sigma = 5, alpha = 0.05")
+```
+
+Power increases with effect size, but not linearly. When the true mean is 0 the null is true, and the rejection rate of `r power_df |> filter(true_mu == 0) |> pull(power) |> round(3)` reflects the type I error rate rather than power — it lands close to alpha, as it should. Power then rises steeply between mu = 1 and mu = 4, climbing from `r power_df |> filter(true_mu == 1) |> pull(power) |> round(2)` to `r power_df |> filter(true_mu == 4) |> pull(power) |> round(2)`, before flattening as it approaches 1.
+
+The flattening reflects diminishing returns: once an effect is large relative to the standard error, it is detected nearly every time, and making it larger cannot improve detection further. With n = 30 and sigma = 5 the standard error is roughly 0.9, so a true mean of 4 sits more than four standard errors from zero and is almost always significant.
+
+```{r}
+estimate_df = 
+  bind_rows(
+    sim_results_df |> 
+      group_by(true_mu) |> 
+      summarize(avg_estimate = mean(estimate)) |> 
+      mutate(sample = "All samples"),
+    sim_results_df |> 
+      filter(p.value < 0.05) |> 
+      group_by(true_mu) |> 
+      summarize(avg_estimate = mean(estimate)) |> 
+      mutate(sample = "Null rejected only")
+  )
+
+estimate_df |> 
+  ggplot(aes(x = true_mu, y = avg_estimate, color = sample)) + 
+  geom_line() + 
+  geom_point() + 
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey50") + 
+  scale_x_continuous(breaks = 0:6) + 
+  labs(
+    title = "Average estimate of mu by true value",
+    x = "True value of mu",
+    y = "Average estimate of mu-hat",
+    color = "Samples included",
+    caption = "Dashed line marks where the estimate equals the true value")
+```
+
+Averaged across all samples, the estimate of mu tracks the true value almost exactly - the "All samples" series sits on the 45-degree line at every value. This is expected: the sample mean is an unbiased estimator of mu, so averaging over 5,000 draws recovers the truth.
+
+Among only those samples where the null was rejected, the average estimate is noticeably larger than the true value when mu is small. At mu = 1 the average estimate among rejected tests is `r estimate_df |> filter(sample == "Null rejected only", true_mu == 1) |> pull(avg_estimate) |> round(2)`, and at mu = 2 it is `r estimate_df |> filter(sample == "Null rejected only", true_mu == 2) |> pull(avg_estimate) |> round(2)` - both well above the truth. The two series converge by mu = 4 and are indistinguishable at 5 and 6.
+
+The sample average among rejected tests is therefore not approximately equal to the true mu when the effect is small. Rejection is not a random subset of samples: a test reaches significance only when the estimate falls far enough from zero, so conditioning on rejection selects the samples that happened to produce unusually large estimates. When power is low, only those extreme samples are retained, and the conditional average is inflated.
+
+As mu increases, power approaches 1 and nearly every sample is rejected. The "rejected" subset then becomes effectively the full set, the selection disappears, and the conditional average converges on the true value. This is why the gap closes from mu = 4 onward.
+
+At mu = 0 the conditional average sits near zero despite the same selection effect, because rejections occur symmetrically in both tails - the unusually large positive and negative estimates cancel when averaged.
